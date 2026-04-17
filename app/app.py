@@ -30,7 +30,7 @@ from app.config import BACKEND_LABEL, validate_secrets
 from app.features.bibtex_extractor import extract_bibtex_entries
 from app.logging_config import setup_logging
 from app.storage import chats as chat_store
-from app.ui.artifacts import render_artifact_panel
+from app.ui.artifacts import render_inline_artifacts
 from app.ui.assets import logo_image, logo_pil_image, profile_image
 from app.ui.sidebar_history import render_history_sidebar
 from app.ui.spinner import rotating_logo_html
@@ -96,18 +96,89 @@ def _current_user_email() -> str | None:
     return None
 
 
+def _current_user_provider() -> str | None:
+    """Return a human label for which OAuth provider signed the user in."""
+    if not _auth_enabled():
+        return None
+    try:
+        if not getattr(st.user, "is_logged_in", False):
+            return None
+        iss = getattr(st.user, "iss", "") or ""
+        if "microsoft" in iss or "microsoftonline" in iss:
+            return "Microsoft"
+        if "google" in iss or "accounts.google.com" in iss:
+            return "Google"
+    except Exception:
+        return None
+    return None
+
+
+def _provider_configured(name: str) -> bool:
+    try:
+        auth = st.secrets.get("auth")
+        if not auth:
+            return False
+        return bool(auth.get(name))
+    except Exception:
+        return False
+
+
 def _render_login_screen() -> None:
+    st.markdown('<div class="landing-hero">', unsafe_allow_html=True)
     if BOT_AVATAR is not None:
-        col1, col2 = st.columns([1, 12])
-        with col1:
-            st.image(BOT_AVATAR, width=56)
-        with col2:
-            st.title("TalTech Research Assistant")
+        col_l, col_c, col_r = st.columns([1, 2, 1])
+        with col_c:
+            st.image(BOT_AVATAR, width=110)
+    st.markdown(
+        "<h1>TalTech Research Assistant</h1>"
+        "<p>Sign in to access your chat history and research workspace.</p>",
+        unsafe_allow_html=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    has_google = _provider_configured("google")
+    has_microsoft = _provider_configured("microsoft")
+
+    if has_google and has_microsoft:
+        col_g, col_m = st.columns(2)
+        with col_g:
+            if st.button(
+                "Continue with Google",
+                type="primary",
+                use_container_width=True,
+                key="login_google",
+            ):
+                st.login("google")
+        with col_m:
+            if st.button(
+                "Continue with Microsoft",
+                use_container_width=True,
+                key="login_microsoft",
+            ):
+                st.login("microsoft")
+    elif has_microsoft:
+        if st.button(
+            "Continue with Microsoft",
+            type="primary",
+            use_container_width=True,
+            key="login_microsoft",
+        ):
+            st.login("microsoft")
     else:
-        st.title("TalTech Research Assistant")
-    st.caption("Sign in with Google to access your chat history.")
-    if st.button("Sign in with Google", type="primary"):
-        st.login("google")
+        if st.button(
+            "Continue with Google",
+            type="primary",
+            use_container_width=True,
+            key="login_google",
+        ):
+            st.login("google")
+
+    st.markdown(
+        "<div class='landing-footer'>"
+        "By continuing, you agree to the TalTech terms."
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ── Secrets validation banner ─────────────────────────────────────────────────
@@ -205,15 +276,19 @@ for _k, _v in _defaults.items():
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     if BOT_AVATAR is not None:
-        side_col1, side_col2 = st.columns([1, 4])
-        with side_col1:
-            st.image(BOT_AVATAR, width=40)
-        with side_col2:
-            st.title("TalTech Agent")
-    else:
-        st.title("TalTech Agent")
+        logo_l, logo_c, logo_r = st.columns([1, 2, 1])
+        with logo_c:
+            st.image(BOT_AVATAR, width=140)
+    st.markdown(
+        "<h2 style='text-align:center;margin:0.25rem 0 0.5rem 0'>TalTech Agent</h2>",
+        unsafe_allow_html=True,
+    )
     st.caption(f"Backend: {BACKEND_LABEL}")
-    st.caption(f"Signed in as **{_user_email}**")
+    _provider_label = _current_user_provider()
+    if _provider_label:
+        st.caption(f"Signed in with {_provider_label} · **{_user_email}**")
+    else:
+        st.caption(f"Signed in as **{_user_email}**")
     if _auth_enabled():
         if st.button("Sign out", key="logout_btn"):
             st.logout()
@@ -242,161 +317,160 @@ with st.sidebar:
             st.info("No citations collected yet.")
 
 # ── Main area ─────────────────────────────────────────────────────────────────
-if BOT_AVATAR is not None:
-    head_col1, head_col2 = st.columns([1, 12])
-    with head_col1:
-        st.image(BOT_AVATAR, width=56)
-    with head_col2:
-        st.title("TalTech Research Assistant")
-else:
-    st.title("TalTech Research Assistant")
-st.caption(
-    "Bilingual (ET/EN) · Thesis · Papers · Datasets · Simulation Tools · GitHub · Plots"
+# Empty-state hero appears only on a fresh chat.
+if not st.session_state.messages:
+    st.markdown(
+        "<div class='empty-state'>"
+        "<h1>What are you researching today?</h1>"
+        "<p>Ask about TalTech theses, papers, datasets, simulation tools, or paste "
+        "an abstract. Generate citations, plots, study plans, or code reviews.</p>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+# Render chat history inline — artifacts persist across reruns.
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"], avatar=_avatar_for(msg["role"])):
+        _render_attachments(msg.get("attachments") or [])
+        st.markdown(msg["content"])
+        render_inline_artifacts(msg.get("artifacts") or [])
+
+# Render pending-attachment chips as a compact flex row above the composer.
+if st.session_state.pending_attachments:
+    st.markdown('<div class="attachment-chips">', unsafe_allow_html=True)
+    chip_cols = st.columns(len(st.session_state.pending_attachments))
+    for idx, entry in enumerate(st.session_state.pending_attachments):
+        with chip_cols[idx]:
+            label = entry["name"]
+            if len(label) > 22:
+                label = label[:20] + "…"
+            if st.button(
+                f"✕ {label}",
+                key=f"rm_{entry['digest']}",
+                help=f"Remove {entry['name']}",
+            ):
+                _remove_pending(entry["digest"])
+                st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# Composer: + popover overlaid on the chat input via CSS.
+st.markdown('<div class="composer">', unsafe_allow_html=True)
+with st.popover("➕", use_container_width=False):
+    uploaded = st.file_uploader(
+        "Upload PDF or image",
+        type=["pdf", "png", "jpg", "jpeg"],
+        accept_multiple_files=True,
+        key="plus_uploader",
+    )
+    if uploaded:
+        for f in uploaded:
+            _queue_attachment(f)
+
+    with st.form("cite_form", clear_on_submit=True):
+        cite_query = st.text_input(
+            "Cite a source",
+            label_visibility="collapsed",
+            placeholder="Cite a source (DOI, title, URL)",
+            key="cite_query_field",
+        )
+        cite_submit = st.form_submit_button(
+            "Generate citation", use_container_width=True
+        )
+        if cite_submit and cite_query.strip():
+            st.session_state.queued_prompt = (
+                f"Generate BibTeX, IEEE, and APA citations for: "
+                f"{cite_query.strip()}"
+            )
+
+chat_disabled = st.session_state.is_generating
+typed = st.chat_input(
+    "Ask a research question, paste an abstract, or request a plot…",
+    disabled=chat_disabled,
 )
+st.markdown("</div>", unsafe_allow_html=True)
 
-chat_col, artifact_col = st.columns([2, 1], gap="medium")
+# Prefer queued prompt (from citation form) over chat_input when both fire.
+prompt_text = (typed or "").strip()
+if not prompt_text and st.session_state.queued_prompt:
+    prompt_text = st.session_state.queued_prompt
+    st.session_state.queued_prompt = None
 
-with artifact_col:
-    render_artifact_panel(st.session_state.artifacts)
+pending_files = _drain_pending_attachments() if prompt_text else []
 
-with chat_col:
-    # Render chat history
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"], avatar=_avatar_for(msg["role"])):
-            _render_attachments(msg.get("attachments") or [])
-            st.markdown(msg["content"])
+if prompt_text or pending_files:
+    attachments = classify_attachments(pending_files) if pending_files else []
+    for att in attachments:
+        if att.get("kind") == "skipped":
+            st.warning(att.get("skipped_reason", "File skipped."))
 
-    # `+` popover for uploads and citations, plus chat input.
-    plus_col, input_col = st.columns([1, 20], gap="small")
-    with plus_col:
-        with st.popover("➕", use_container_width=True):
-            uploaded = st.file_uploader(
-                "Upload PDF or image",
-                type=["pdf", "png", "jpg", "jpeg"],
-                accept_multiple_files=True,
-                key="plus_uploader",
+    display_text = prompt_text or "(attachments only)"
+    agent_prompt = prompt_text or (
+        "The user uploaded attachments without a text prompt. Analyse them and "
+        "search for related TalTech and public resources."
+    )
+
+    # Persist chat row (create on first turn).
+    if st.session_state.current_chat_id is None:
+        st.session_state.current_chat_id = chat_store.new_chat(
+            _user_email, display_text
+        )
+
+    user_msg = {"role": "user", "content": display_text, "attachments": attachments}
+    st.session_state.messages.append(user_msg)
+    chat_store.save_message(
+        st.session_state.current_chat_id,
+        _user_email,
+        "user",
+        display_text,
+        attachments=attachments,
+    )
+
+    with st.chat_message("user", avatar=USER_AVATAR):
+        _render_attachments(attachments)
+        st.markdown(display_text)
+
+    st.session_state.is_generating = True
+    try:
+        with st.chat_message("assistant", avatar=BOT_AVATAR):
+            thinking_slot = st.empty()
+            thinking_slot.markdown(
+                rotating_logo_html("Searching TalTech resources…"),
+                unsafe_allow_html=True,
             )
-            if uploaded:
-                for f in uploaded:
-                    _queue_attachment(f)
-
-            st.divider()
-            with st.form("cite_form", clear_on_submit=True):
-                cite_query = st.text_input(
-                    "Cite a source (title, URL, or DOI)",
-                    key="cite_query_field",
+            try:
+                history = _build_history()
+                result = agent_run(
+                    agent_prompt,
+                    history=history,
+                    attachments=attachments,
                 )
-                cite_submit = st.form_submit_button("Generate citation")
-                if cite_submit and cite_query.strip():
-                    st.session_state.queued_prompt = (
-                        f"Generate BibTeX, IEEE, and APA citations for: "
-                        f"{cite_query.strip()}"
-                    )
+            finally:
+                thinking_slot.empty()
 
-    # Render pending-attachment chips so the user can remove before sending.
-    if st.session_state.pending_attachments:
-        with input_col:
-            st.caption("Attached:")
-            cols = st.columns(min(4, len(st.session_state.pending_attachments)))
-            for idx, entry in enumerate(st.session_state.pending_attachments):
-                target = cols[idx % len(cols)]
-                with target:
-                    if st.button(
-                        f"✕ {entry['name'][:18]}",
-                        key=f"rm_{entry['digest']}",
-                        help="Remove attachment",
-                    ):
-                        _remove_pending(entry["digest"])
-                        st.rerun()
-
-    chat_disabled = st.session_state.is_generating
-    with input_col:
-        typed = st.chat_input(
-            "Ask a research question, paste an abstract, or request a plot…",
-            disabled=chat_disabled,
-        )
-
-    # Prefer queued prompt (from citation form) over chat_input when both fire.
-    prompt_text = (typed or "").strip()
-    if not prompt_text and st.session_state.queued_prompt:
-        prompt_text = st.session_state.queued_prompt
-        st.session_state.queued_prompt = None
-
-    pending_files = _drain_pending_attachments() if prompt_text else []
-
-    if prompt_text or pending_files:
-        attachments = classify_attachments(pending_files) if pending_files else []
-        for att in attachments:
-            if att.get("kind") == "skipped":
-                st.warning(att.get("skipped_reason", "File skipped."))
-
-        display_text = prompt_text or "(attachments only)"
-        agent_prompt = prompt_text or (
-            "The user uploaded attachments without a text prompt. Analyse them and "
-            "search for related TalTech and public resources."
-        )
-
-        # Persist chat row (create on first turn).
-        if st.session_state.current_chat_id is None:
-            st.session_state.current_chat_id = chat_store.new_chat(
-                _user_email, display_text
+            response = result.get("content", "") if isinstance(result, dict) else str(result)
+            new_artifacts = (
+                result.get("artifacts", []) if isinstance(result, dict) else []
             )
+            st.markdown(response)
+            render_inline_artifacts(new_artifacts)
+            _extract_and_store_bibtex(response)
 
-        user_msg = {"role": "user", "content": display_text, "attachments": attachments}
-        st.session_state.messages.append(user_msg)
+        if new_artifacts:
+            st.session_state.artifacts.extend(new_artifacts)
+
+        assistant_msg = {
+            "role": "assistant",
+            "content": response,
+            "artifacts": new_artifacts,
+        }
+        st.session_state.messages.append(assistant_msg)
         chat_store.save_message(
             st.session_state.current_chat_id,
             _user_email,
-            "user",
-            display_text,
-            attachments=attachments,
+            "assistant",
+            response,
+            artifacts=new_artifacts,
         )
-
-        with st.chat_message("user", avatar=USER_AVATAR):
-            _render_attachments(attachments)
-            st.markdown(display_text)
-
-        st.session_state.is_generating = True
-        try:
-            with st.chat_message("assistant", avatar=BOT_AVATAR):
-                thinking_slot = st.empty()
-                thinking_slot.markdown(
-                    rotating_logo_html("Searching TalTech resources…"),
-                    unsafe_allow_html=True,
-                )
-                try:
-                    history = _build_history()
-                    result = agent_run(
-                        agent_prompt,
-                        history=history,
-                        attachments=attachments,
-                    )
-                finally:
-                    thinking_slot.empty()
-
-                response = result.get("content", "") if isinstance(result, dict) else str(result)
-                new_artifacts = (
-                    result.get("artifacts", []) if isinstance(result, dict) else []
-                )
-                st.markdown(response)
-                _extract_and_store_bibtex(response)
-
-            if new_artifacts:
-                st.session_state.artifacts.extend(new_artifacts)
-
-            assistant_msg = {
-                "role": "assistant",
-                "content": response,
-                "artifacts": new_artifacts,
-            }
-            st.session_state.messages.append(assistant_msg)
-            chat_store.save_message(
-                st.session_state.current_chat_id,
-                _user_email,
-                "assistant",
-                response,
-                artifacts=new_artifacts,
-            )
-        finally:
-            st.session_state.is_generating = False
-        st.rerun()
+    finally:
+        st.session_state.is_generating = False
+    st.rerun()

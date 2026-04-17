@@ -72,7 +72,30 @@ GITHUB_TOKEN = _get_secret("GITHUB_TOKEN", "")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 CATALOG_PATH = Path(__file__).parent / "catalog" / "simulation_tools.yaml"
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+# DATA_DIR resolution order:
+#   1. CHATS_DATA_DIR env / secret override
+#   2. /gpfs/mariana/home/tayyab/Hackathon/data (HPC default; survives redeploys)
+#   3. project-local ./data
+# On Streamlit Cloud the gpfs path is unreachable — we fall back to /tmp.
+_STREAMLIT_CLOUD: bool = _get_secret("STREAMLIT_CLOUD", "").lower() in {"1", "true", "yes"}
+_HPC_DATA_DIR = Path("/gpfs/mariana/home/tayyab/Hackathon/data")
+_LOCAL_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+_data_dir_override: str = _get_secret("CHATS_DATA_DIR", "").strip()
+if _data_dir_override:
+    DATA_DIR = Path(_data_dir_override)
+    CHATS_DB_EPHEMERAL = False
+elif _STREAMLIT_CLOUD:
+    DATA_DIR = Path("/tmp")
+    CHATS_DB_EPHEMERAL = True
+elif _HPC_DATA_DIR.parent.exists():
+    DATA_DIR = _HPC_DATA_DIR
+    CHATS_DB_EPHEMERAL = False
+else:
+    DATA_DIR = _LOCAL_DATA_DIR
+    CHATS_DB_EPHEMERAL = False
+
 CHATS_DB_PATH = DATA_DIR / "chats.db"
 
 # ── Semantic Scholar ──────────────────────────────────────────────────────────
@@ -84,10 +107,10 @@ SEMANTIC_SCHOLAR_API_KEY = _get_secret("SEMANTIC_SCHOLAR_API_KEY", "")
 ARXIV_API_URL = "http://export.arxiv.org/api/query"
 
 # ── TalTech digikogu ──────────────────────────────────────────────────────────
-DIGIKOGU_SEARCH_URL = (
-    "https://digikogu.taltech.ee/en/Search/Items"
-    "?Query%5B1%5D={query}&SortType=-47"
-)
+# The live search form uses `?search=<q>`; older `Query[1]=` URLs silently
+# return the full unfiltered catalog.
+DIGIKOGU_SEARCH_URL = "https://digikogu.taltech.ee/en/Search/Items?search={query}"
+DIGIKOGU_SEARCH_URL_ET = "https://digikogu.taltech.ee/et/Search/Items?search={query}"
 
 # ── GitHub ────────────────────────────────────────────────────────────────────
 GITHUB_API_URL = "https://api.github.com"

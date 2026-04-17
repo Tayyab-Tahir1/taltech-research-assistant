@@ -41,6 +41,7 @@ def render_history_sidebar(user_email: str) -> None:
 
 def _render_chat_row(chat: Any, user_email: str) -> None:
     is_active = st.session_state.get("current_chat_id") == chat.id
+    st.markdown('<div class="sidebar-row-wrapper">', unsafe_allow_html=True)
     col_main, col_menu = st.columns([5, 1], gap="small")
 
     with col_main:
@@ -69,6 +70,7 @@ def _render_chat_row(chat: Any, user_email: str) -> None:
                 if st.session_state.get("current_chat_id") == chat.id:
                     _reset_chat_state()
                 st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def _load_chat_into_state(chat_id: int, user_email: str) -> None:

@@ -24,8 +24,12 @@ from app.tools.github_search import (
     get_github_readme,
 )
 from app.tools.analysis import generate_plot, run_analysis
+from app.tools.image_gen import generate_image
 from app.features.gap_finder import find_research_gaps
 from app.features.similar_thesis import find_similar_theses
+from app.features.writing_assistant import polish_text
+from app.features.study_planner import build_study_plan
+from app.features.code_reviewer import review_code
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +52,10 @@ You have access to the following tools:
 - find_similar_theses: Find theses and papers similar to a given abstract
 - generate_plot: Build a Plotly chart (bar/line/scatter/hist/pie) from data you already have
 - run_analysis: Run a short Python snippet for analysis; returns plots, tables, and code as artifacts
+- generate_image: Render a PNG from a text prompt (Gemini 2.0 Flash). Use for diagrams, illustrations, system sketches.
+- polish_text: Rewrite, summarise, expand, or translate a block of prose (tasks: polish/summarize/expand/translate_et/translate_en).
+- build_study_plan: Produce a week-by-week study plan as a table artifact.
+- review_code: Review a code snippet and return findings + severity.
 
 HOW TO INTERPRET INTENT (infer from the prompt — there are no explicit modes):
   • If the user pastes a long block resembling a thesis abstract (≥ ~400 chars
@@ -57,6 +65,15 @@ HOW TO INTERPRET INTENT (infer from the prompt — there are no explicit modes):
   • If the user explicitly says "cite", "citation", "BibTeX", "IEEE", or "APA"
     for a specific source, search for the source first (if needed) and then
     produce BibTeX + IEEE + APA blocks side by side.
+  • If the user says "draw", "generate an image", "make a diagram", "sketch",
+    or "illustrate", call ``generate_image``.
+  • If the user says "polish", "rewrite", "proofread", "summarise", "expand",
+    or "translate" (to Estonian / English), call ``polish_text`` with the
+    matching ``task``.
+  • If the user asks for a "study plan", "schedule", "syllabus", "learning
+    roadmap", or "X-week plan for Y", call ``build_study_plan``.
+  • If the user asks to "review this code", "audit this function", "find bugs
+    in this snippet", call ``review_code``.
   • Otherwise, run the general research flow: TalTech theses first, then
     Semantic Scholar, then arXiv.
 
@@ -374,6 +391,131 @@ TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "generate_image",
+            "description": (
+                "Generate a PNG image from a text prompt using Gemini 2.0 Flash. "
+                "Use for diagrams, illustrations, system sketches, or conceptual "
+                "figures the student asks to see. The image is rendered inline in "
+                "the assistant message."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "What to draw — be concrete and visual.",
+                    },
+                    "aspect_ratio": {
+                        "type": "string",
+                        "description": "Aspect ratio hint, e.g. '1:1', '16:9', '3:4'. Default '1:1'.",
+                    },
+                },
+                "required": ["prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "polish_text",
+            "description": (
+                "Rewrite a block of text. Tasks: 'polish' (grammar + flow), "
+                "'summarize', 'expand', 'translate_et' (to Estonian), "
+                "'translate_en' (to English). Use when the student asks to "
+                "proofread, rewrite, shorten, expand, or translate prose."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The input prose."},
+                    "task": {
+                        "type": "string",
+                        "enum": [
+                            "polish",
+                            "summarize",
+                            "expand",
+                            "translate_et",
+                            "translate_en",
+                        ],
+                        "description": "What to do with the text.",
+                    },
+                    "tone": {
+                        "type": "string",
+                        "description": "Tone: 'academic', 'casual', 'concise', 'engineering'. Default 'academic'.",
+                    },
+                    "target_length": {
+                        "type": "string",
+                        "description": "Relative length target: 'same', 'shorter', 'longer'. Default 'same'.",
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "build_study_plan",
+            "description": (
+                "Produce a week-by-week study plan table artifact for a given "
+                "topic. Use when the student asks for a study plan, syllabus, "
+                "learning roadmap, or 'X-week plan'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "description": "What the student is studying.",
+                    },
+                    "weeks": {
+                        "type": "integer",
+                        "description": "Number of weeks (1-26). Default 6.",
+                    },
+                    "hours_per_week": {
+                        "type": "integer",
+                        "description": "Target weekly effort in hours (1-60). Default 8.",
+                    },
+                    "milestones": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional required milestones the plan must hit.",
+                    },
+                },
+                "required": ["topic"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "review_code",
+            "description": (
+                "Review a code snippet and return findings with severity "
+                "(CRITICAL/HIGH/MEDIUM/LOW) plus a suggested refactor. Use "
+                "when the student asks to review, audit, or find bugs in code."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "The code to review."},
+                    "language": {
+                        "type": "string",
+                        "description": "Language identifier, e.g. 'python', 'cpp', 'matlab'. Default 'python'.",
+                    },
+                    "focus": {
+                        "type": "string",
+                        "enum": ["bugs+style", "bugs", "style", "security", "performance"],
+                        "description": "What to emphasise. Default 'bugs+style'.",
+                    },
+                },
+                "required": ["code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "find_similar_theses",
             "description": (
                 "Given a thesis abstract or description, find similar TalTech theses "
@@ -417,10 +559,20 @@ _TOOL_MAP: dict[str, Any] = {
     "find_similar_theses": find_similar_theses,
     "generate_plot": generate_plot,
     "run_analysis": run_analysis,
+    "generate_image": generate_image,
+    "polish_text": polish_text,
+    "build_study_plan": build_study_plan,
+    "review_code": review_code,
 }
 
 # Tools that emit artifact descriptors consumable by the right-hand UI panel.
-_ARTIFACT_TOOLS = {"generate_plot", "run_analysis"}
+_ARTIFACT_TOOLS = {
+    "generate_plot",
+    "run_analysis",
+    "generate_image",
+    "build_study_plan",
+    "review_code",
+}
 
 # Tools that warrant the deep-reasoning model tier (Gemini 2.5 Pro with thinking).
 _DEEP_TOOLS = {"find_research_gaps", "find_similar_theses"}

@@ -28,7 +28,9 @@ Copy `.env.example` to `.env` and fill in values.
 | `GITHUB_TOKEN` | No | Raises GitHub rate limit 60→5000 req/hr |
 | `KAGGLE_USERNAME` + `KAGGLE_KEY` | No | Dataset search |
 
-Google OAuth for per-user chat history is configured in `.streamlit/secrets.toml` as a `[auth]` block — see `.env.example`. Without it, the app falls back to a single `local@localhost` user.
+OAuth for per-user chat history is configured in `.streamlit/secrets.toml` as an `[auth]` block with per-provider sub-blocks (`[auth.google]`, `[auth.microsoft]`) — see `.env.example`. Either or both providers can be enabled; omitting a sub-block hides that button on the landing screen. Without any `[auth]` section the app falls back to a single `local@localhost` user.
+
+The chat-history SQLite database lives at `CHATS_DB_PATH` — default `/gpfs/mariana/home/tayyab/Hackathon/data/chats.db` on HPC, overridable via `CHATS_DATA_DIR`. When `STREAMLIT_CLOUD=true` the path falls back to `/tmp/chats.db` with a visible banner ("Chat history will not persist across redeploys on this host.").
 
 ## Architecture
 
@@ -38,7 +40,7 @@ The agent is a **Gemini 2.5 function-calling loop** (`app/agent.py`); OpenAI and
 2. `agent.run()` sends messages + tool schemas through `app/llm/router.py` to the active backend.
 3. The model decides which tools to call; `_call_tool()` dispatches to the tool functions.
 4. Tool results are appended; the loop repeats. Calls to `find_research_gaps` / `find_similar_theses` pin the rest of the turn to `DEEP_MODEL` (Gemini Pro with thinking).
-5. Artifacts from `generate_plot` / `run_analysis` are collected and surfaced in the UI's right-hand panel.
+5. Artifacts from `generate_plot`, `run_analysis`, `generate_image`, `build_study_plan`, and `review_code` are collected and rendered **inline** inside the assistant chat bubble (ChatGPT/Claude-style), not in a side panel.
 
 ### Backend adapters (`app/llm/`)
 
@@ -61,8 +63,12 @@ The agent is a **Gemini 2.5 function-calling loop** (`app/agent.py`); OpenAI and
 | `get_github_readme` | GitHub API | Returns first 2000 chars |
 | `generate_plot` | Plotly spec builder | Kinds: `bar`, `line`, `scatter`, `hist`, `pie` |
 | `run_analysis` | Sandboxed subprocess (`-I`, PYTHONNOUSERSITE, timeout 15s) | Emits tables/figures via `emit_table` / `emit_figure` helpers |
+| `generate_image` | Gemini 2.0 Flash image generation (`app/tools/image_gen.py`) | Emits `image` artifacts (base64 PNG) |
+| `polish_text` | Gemini Flash writing assistant (`app/features/writing_assistant.py`) | Tasks: `polish`, `summarize`, `expand`, `translate_et`, `translate_en` |
+| `build_study_plan` | Gemini Flash planner (`app/features/study_planner.py`) | Emits a `table` artifact: week / focus / reading / output |
+| `review_code` | Gemini code reviewer (`app/features/code_reviewer.py`) | Emits `code` + `markdown` findings artifacts |
 
-`generate_plot` and `run_analysis` return **artifact descriptors** (`{id, kind, mime, title, payload}`) that the UI renders in a Claude-style side panel.
+All artifact-emitting tools return **artifact descriptors** (`{id, kind, mime, title, payload}`) rendered inline inside the assistant chat bubble via `app/ui/artifacts.py::render_inline_artifacts()`.
 
 ### Features (`app/features/`)
 
@@ -73,13 +79,13 @@ The agent is a **Gemini 2.5 function-calling loop** (`app/agent.py`); OpenAI and
 
 ### Storage (`app/storage/`)
 
-- `chats.py` — per-user SQLite persistence (`data/chats.db`, git-ignored). Tables: `chats(id, user_email, title, created_at, updated_at)` and `messages(id, chat_id, role, content, attachments_json, artifacts_json, created_at)`. Every query is parameterised with `user_email` in the WHERE clause so users cannot read each other's history.
+- `chats.py` — per-user SQLite persistence. DB path comes from `config.CHATS_DB_PATH` (HPC-resident `/gpfs/.../data/chats.db` by default, `/tmp/chats.db` on Streamlit Cloud, overridable via `CHATS_DATA_DIR`). Tables: `chats(id, user_email, title, created_at, updated_at)` and `messages(id, chat_id, role, content, attachments_json, artifacts_json, created_at)`. Every query is parameterised with `user_email` in the WHERE clause so users cannot read each other's history.
 
 ### UI (`app/ui/`)
 
-- `artifacts.py` — renders the right-hand artifact panel (Plotly charts, DataFrames with CSV download, code blocks) as tabs.
-- `sidebar_history.py` — renders the per-user chat list grouped by Today/Yesterday/Earlier with Rename/Delete per row and a "➕ New chat" button.
-- `styles.py`, `assets.py`, `spinner.py` — CSS, logo/avatar loaders, rotating-logo thinking indicator.
+- `artifacts.py` — `render_inline_artifacts(list)` renders Plotly charts, DataFrames + CSV download, images (base64 PNG), code, and markdown **inline** inside the current Streamlit container (the assistant chat bubble).
+- `sidebar_history.py` — renders the per-user chat list grouped by Today/Yesterday/Earlier with left-aligned titles and hover-only three-dots Rename/Delete popovers.
+- `styles.py`, `assets.py`, `spinner.py` — CSS (composer overlay, empty-state hero, attachment chips, sidebar hover), logo/avatar loaders, rotating-logo thinking indicator.
 
 ### Config (`app/config.py`)
 
@@ -94,13 +100,19 @@ There is no mode radio — the agent auto-detects intent from the prompt per rul
 - "cite", "BibTeX", "APA" → `generate_citation`
 - everything else → general search flow (thesis → Semantic Scholar → arXiv)
 - "plot" / "analysis" / "compare" / "trend" → `generate_plot` or `run_analysis`
+- "draw" / "generate" / "make an image of" → `generate_image`
+- "polish" / "rewrite" / "summarize" / "translate" → `polish_text`
+- "study plan" / "schedule" / "syllabus" → `build_study_plan`
+- "review this code" / "audit this function" → `review_code`
 
 ## UI flow
 
-- Google sign-in gate: the main page is blocked by a `st.login("google")` button until `st.user.is_logged_in` is true (falls back to `local@localhost` if `[auth]` is not configured).
-- Sidebar: logo, backend label, signed-in email, Sign out, per-user chat history, Export / BibTeX buttons.
-- Main area is a 2:1 split: chat on the left, artifact panel on the right.
-- A `➕` popover to the left of the chat input exposes file upload (PDF/image) and a "Generate citation" form. Pending uploads are deduplicated by sha1 digest and shown as removable chips before submission.
+- Multi-provider sign-in gate: the landing screen shows centered **Continue with Google** and **Continue with Microsoft** buttons (only the configured ones appear). Each calls `st.login("google")` / `st.login("microsoft")`. Falls back to `local@localhost` when `[auth]` is absent.
+- `_current_user_provider()` in `app/app.py` classifies the signed-in user by inspecting `st.user.iss` (OIDC issuer) and returns `"Google"`, `"Microsoft"`, or `None`. The sidebar shows "Signed in with <provider> · <email>".
+- Sidebar: large centered TalTech logo above the "TalTech Agent" title, backend label, signed-in email + provider, Sign out, per-user chat history (left-aligned, hover-only three-dots Rename/Delete), Export / BibTeX buttons.
+- Main area: single-column chat. When the thread is empty, a ChatGPT-style hero ("What are you researching today?") is shown; once the first message lands, the hero disappears and chat takes the full width.
+- Artifacts (plots, tables, images, code, markdown) are rendered **inline inside the assistant bubble**, not in a side panel. Persisted artifacts are re-rendered from `st.session_state.messages` on each rerun.
+- The `➕` popover sits **inside** the chat input's left edge (CSS overlay: `position: absolute; left: 10px; bottom: 8px`) and exposes file upload (PDF/image) and a "Cite a source" input. Pending uploads are deduplicated by sha1 digest and shown as 28px ellipsised chips with a small `×`.
 
 ## LLM backend switching
 
@@ -147,13 +159,21 @@ The HPC firewall blocks inbound ports, so the app is published via Streamlit Com
    [auth]
    redirect_uri = "https://<app>.streamlit.app/oauth2callback"
    cookie_secret = "<32-byte random string>"
+
+   [auth.google]
    client_id = "<google oauth client id>"
    client_secret = "<google oauth secret>"
    server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+
+   [auth.microsoft]
+   client_id = "<microsoft azure app id>"
+   client_secret = "<microsoft azure client secret>"
+   server_metadata_url = "https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration"
    ```
+   Either sub-block may be omitted to hide that provider on the landing screen. For Microsoft, register the redirect URI `https://<app>.streamlit.app/oauth2callback` under the Azure App Registration's "Authentication → Web → Redirect URIs".
 5. Deploy. The app lives at `https://<app-name>.streamlit.app`.
 
-Note: Streamlit Cloud resets the container on redeploy, so `data/chats.db` is ephemeral. Acceptable for the hackathon; for permanent storage mount a volume or move to Supabase/Postgres.
+Note: Streamlit Cloud resets the container on redeploy, so `data/chats.db` is ephemeral there. The app auto-detects `STREAMLIT_CLOUD=true` and falls back to `/tmp/chats.db` with a visible banner. On the HPC, the DB is persisted to `/gpfs/mariana/home/tayyab/Hackathon/data/chats.db` (override via `CHATS_DATA_DIR`). For permanent cloud storage, mount a volume or move to Supabase/Postgres.
 
 `app/config.py` reads from `st.secrets` first, then falls back to `os.environ`, so the same code runs locally and on Cloud.
 
