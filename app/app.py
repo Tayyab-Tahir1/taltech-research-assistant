@@ -71,120 +71,13 @@ def _render_attachments(attachments: list[dict]) -> None:
     st.caption(" · ".join(chips))
 
 
-# ── Auth gate ─────────────────────────────────────────────────────────────────
-def _auth_enabled() -> bool:
-    """Return True if Streamlit native OAuth is configured."""
-    try:
-        return bool(st.secrets.get("auth"))
-    except Exception:
-        return False
-
-
-def _current_user_email() -> str | None:
-    """Return the signed-in user's email, or None if not signed in.
-
-    If OAuth is not configured, fall back to a single local user so the app
-    stays usable in development without a `[auth]` secrets block.
-    """
-    if not _auth_enabled():
-        return "local@localhost"
-    try:
-        if getattr(st.user, "is_logged_in", False):
-            return st.user.email
-    except Exception:
-        return None
-    return None
+# ── User identity (OAuth removed — single shared local user) ─────────────────
+def _current_user_email() -> str:
+    return "local@localhost"
 
 
 def _current_user_provider() -> str | None:
-    """Return a human label for which OAuth provider signed the user in."""
-    if not _auth_enabled():
-        return None
-    try:
-        if not getattr(st.user, "is_logged_in", False):
-            return None
-        iss = getattr(st.user, "iss", "") or ""
-        if "microsoft" in iss or "microsoftonline" in iss:
-            return "Microsoft"
-        if "google" in iss or "accounts.google.com" in iss:
-            return "Google"
-        # Flat [auth] layout doesn't always expose iss — default to Google.
-        if _auth_is_flat_google():
-            return "Google"
-    except Exception:
-        return None
     return None
-
-
-def _provider_configured(name: str) -> bool:
-    """True if [auth.<name>] sub-block exists in secrets (multi-provider mode)."""
-    try:
-        auth = st.secrets.get("auth")
-        if not auth:
-            return False
-        sub = auth.get(name)
-        if not sub:
-            return False
-        # Require at least client_id to consider it configured.
-        return bool(sub.get("client_id"))
-    except Exception:
-        return False
-
-
-def _auth_is_flat_google() -> bool:
-    """True if secrets use the legacy flat [auth] block (client_id at root).
-
-    In that layout, `st.login()` with no arguments is the correct call.
-    """
-    try:
-        auth = st.secrets.get("auth")
-        if not auth:
-            return False
-        return bool(auth.get("client_id")) and not auth.get("google") and not auth.get("microsoft")
-    except Exception:
-        return False
-
-
-def _render_login_screen() -> None:
-    st.markdown('<div class="landing-hero">', unsafe_allow_html=True)
-    if BOT_AVATAR is not None:
-        col_l, col_c, col_r = st.columns([1, 2, 1])
-        with col_c:
-            st.image(BOT_AVATAR, width=110)
-    st.markdown(
-        "<h1>TalTech Research Assistant</h1>"
-        "<p>Sign in to access your chat history and research workspace.</p>",
-        unsafe_allow_html=True,
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    flat_google = _auth_is_flat_google()
-    has_google = _provider_configured("google")
-
-    if st.button(
-        "Continue with Google",
-        type="primary",
-        use_container_width=True,
-        key="login_google",
-    ):
-        if has_google:
-            st.login("google")
-        else:
-            # Legacy flat [auth] layout, or fallback attempt.
-            st.login()
-
-    if not (flat_google or has_google):
-        st.warning(
-            "Google OAuth is not configured. Add an `[auth]` block to "
-            "`.streamlit/secrets.toml` (see `.env.example`)."
-        )
-
-    st.markdown(
-        "<div class='landing-footer'>"
-        "By continuing, you agree to the TalTech terms."
-        "</div>",
-        unsafe_allow_html=True,
-    )
 
 
 # ── Secrets validation banner ─────────────────────────────────────────────────
@@ -193,11 +86,7 @@ if _secret_problems:
     for _p in _secret_problems:
         st.error(_p)
 
-# ── Auth flow ─────────────────────────────────────────────────────────────────
 _user_email = _current_user_email()
-if _user_email is None:
-    _render_login_screen()
-    st.stop()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -290,14 +179,6 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.caption(f"Backend: {BACKEND_LABEL}")
-    _provider_label = _current_user_provider()
-    if _provider_label:
-        st.caption(f"Signed in with {_provider_label} · **{_user_email}**")
-    else:
-        st.caption(f"Signed in as **{_user_email}**")
-    if _auth_enabled():
-        if st.button("Sign out", key="logout_btn"):
-            st.logout()
     st.divider()
 
     render_history_sidebar(_user_email)
