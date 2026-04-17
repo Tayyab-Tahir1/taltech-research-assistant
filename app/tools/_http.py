@@ -32,3 +32,11 @@ class ScraperStaleError(Exception):
         super().__init__(message or f"{source} page structure changed at {url}")
         self.source = source
         self.url = url
+
+
+class SourceUnavailableError(Exception):
+    """Raised when an external source is temporarily unreachable or returns unexpected data."""
+
+    def __init__(self, service: str, message: str = "") -> None:
+        super().__init__(message or f"{service} temporarily unavailable")
+        self.service = service

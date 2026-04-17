@@ -1,11 +1,16 @@
 """
 TalTech Research Assistant — Streamlit UI
 
-ChatGPT-style interface with sidebar controls, source cards, BibTeX export,
-and support for bilingual (Estonian + English) queries.
+ChatGPT-style interface with:
+- Google sign-in gate (Streamlit native OAuth)
+- Sidebar chat history grouped per user (SQLite)
+- Auto-intent routing (no mode radio — the agent reads the prompt)
+- `+` popover for uploads and citation generation
+- Claude-style artifact side panel for plots, tables, and code
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 
@@ -19,15 +24,20 @@ from datetime import datetime
 
 import streamlit as st
 
-from app.config import BACKEND_LABEL, validate_secrets
 from app.agent import run as agent_run
+from app.attachments import classify_attachments
+from app.config import BACKEND_LABEL, validate_secrets
 from app.features.bibtex_extractor import extract_bibtex_entries
 from app.logging_config import setup_logging
-from app.ui.assets import logo_pil_image
+from app.storage import chats as chat_store
+from app.ui.artifacts import render_artifact_panel
+from app.ui.assets import logo_image, logo_pil_image, profile_image
+from app.ui.sidebar_history import render_history_sidebar
 from app.ui.spinner import rotating_logo_html
 from app.ui.styles import inject_css
 
 setup_logging()
+chat_store.init_db()
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -39,38 +49,82 @@ st.set_page_config(
 
 inject_css()
 
+USER_AVATAR = profile_image()
+BOT_AVATAR = logo_image()
+
+
+def _avatar_for(role: str):
+    return USER_AVATAR if role == "user" else BOT_AVATAR
+
+
+def _render_attachments(attachments: list[dict]) -> None:
+    if not attachments:
+        return
+    chips = []
+    for att in attachments:
+        kind = att.get("kind")
+        name = att.get("name", "file")
+        if kind == "skipped":
+            chips.append(f"⚠️ {att.get('skipped_reason', name)}")
+        else:
+            chips.append(f"📎 {name}")
+    st.caption(" · ".join(chips))
+
+
+# ── Auth gate ─────────────────────────────────────────────────────────────────
+def _auth_enabled() -> bool:
+    """Return True if Streamlit native OAuth is configured."""
+    try:
+        return bool(st.secrets.get("auth"))
+    except Exception:
+        return False
+
+
+def _current_user_email() -> str | None:
+    """Return the signed-in user's email, or None if not signed in.
+
+    If OAuth is not configured, fall back to a single local user so the app
+    stays usable in development without a `[auth]` secrets block.
+    """
+    if not _auth_enabled():
+        return "local@localhost"
+    try:
+        if getattr(st.user, "is_logged_in", False):
+            return st.user.email
+    except Exception:
+        return None
+    return None
+
+
+def _render_login_screen() -> None:
+    if BOT_AVATAR is not None:
+        col1, col2 = st.columns([1, 12])
+        with col1:
+            st.image(BOT_AVATAR, width=56)
+        with col2:
+            st.title("TalTech Research Assistant")
+    else:
+        st.title("TalTech Research Assistant")
+    st.caption("Sign in with Google to access your chat history.")
+    if st.button("Sign in with Google", type="primary"):
+        st.login("google")
+
+
 # ── Secrets validation banner ─────────────────────────────────────────────────
 _secret_problems = validate_secrets()
 if _secret_problems:
     for _p in _secret_problems:
         st.error(_p)
 
-# ── Helper functions (defined first so sidebar can call them) ─────────────────
-
-def _augment_prompt(user_prompt: str, mode: str) -> str:
-    if mode == "Find Research Gaps":
-        return (
-            f"[MODE: Research Gap Analysis] {user_prompt}\n\n"
-            "Use find_research_gaps to analyse how well this topic is covered in "
-            "TalTech theses, then suggest unexplored angles."
-        )
-    if mode == "Similar Thesis Finder":
-        return (
-            f"[MODE: Similar Thesis Finder] {user_prompt}\n\n"
-            "The user has provided their thesis abstract. Use find_similar_theses "
-            "to find related TalTech theses and Semantic Scholar papers."
-        )
-    if mode == "Cite a Source":
-        return (
-            f"[MODE: Citation Generator] {user_prompt}\n\n"
-            "Generate BibTeX, IEEE, and APA citations for the source described. "
-            "Search for it first if needed to get accurate metadata."
-        )
-    return user_prompt
+# ── Auth flow ─────────────────────────────────────────────────────────────────
+_user_email = _current_user_email()
+if _user_email is None:
+    _render_login_screen()
+    st.stop()
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def _build_history() -> list[dict]:
-    """Convert session messages to OpenAI message format (last 20 turns)."""
     history = []
     for msg in st.session_state.messages[-20:]:
         history.append({"role": msg["role"], "content": msg["content"]})
@@ -78,7 +132,6 @@ def _build_history() -> list[dict]:
 
 
 def _extract_and_store_bibtex(response: str) -> None:
-    """Find BibTeX blocks in the response and store them for export."""
     for m in extract_bibtex_entries(response):
         if m not in st.session_state.bibtex_store:
             st.session_state.bibtex_store.append(m)
@@ -96,40 +149,86 @@ def _build_chat_export() -> str:
     return "\n".join(lines)
 
 
-# ── Session state init ────────────────────────────────────────────────────────
-if "messages" not in st.session_state:
-    st.session_state.messages = []        # list of {role, content}
-if "bibtex_store" not in st.session_state:
-    st.session_state.bibtex_store = []    # collected BibTeX strings
-if "mode" not in st.session_state:
-    st.session_state.mode = "Research Assistant"
-if "is_generating" not in st.session_state:
-    st.session_state.is_generating = False
+def _file_digest(file_obj) -> str:
+    try:
+        data = file_obj.getvalue()
+    except Exception:
+        data = getattr(file_obj, "read", lambda: b"")()
+        if hasattr(file_obj, "seek"):
+            try:
+                file_obj.seek(0)
+            except Exception:
+                pass
+    return hashlib.sha1(data).hexdigest()[:16] if data else file_obj.name
 
-MODES = [
-    "Research Assistant",
-    "Find Research Gaps",
-    "Similar Thesis Finder",
-    "Cite a Source",
-]
+
+def _drain_pending_attachments() -> list:
+    """Pull queued uploads into the agent call and clear the buffer."""
+    pending = st.session_state.pending_attachments
+    st.session_state.pending_attachments = []
+    st.session_state.pending_attachment_keys = set()
+    return [entry["file"] for entry in pending]
+
+
+def _queue_attachment(file_obj) -> None:
+    digest = _file_digest(file_obj)
+    if digest in st.session_state.pending_attachment_keys:
+        return
+    st.session_state.pending_attachment_keys.add(digest)
+    st.session_state.pending_attachments.append(
+        {"digest": digest, "name": file_obj.name, "file": file_obj}
+    )
+
+
+def _remove_pending(digest: str) -> None:
+    st.session_state.pending_attachments = [
+        e for e in st.session_state.pending_attachments if e["digest"] != digest
+    ]
+    st.session_state.pending_attachment_keys.discard(digest)
+
+
+# ── Session state init ────────────────────────────────────────────────────────
+_defaults = {
+    "messages": [],
+    "artifacts": [],
+    "bibtex_store": [],
+    "is_generating": False,
+    "current_chat_id": None,
+    "pending_attachments": [],
+    "pending_attachment_keys": set(),
+    "queued_prompt": None,
+}
+for _k, _v in _defaults.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("🎓 TalTech Agent")
+    if BOT_AVATAR is not None:
+        side_col1, side_col2 = st.columns([1, 4])
+        with side_col1:
+            st.image(BOT_AVATAR, width=40)
+        with side_col2:
+            st.title("TalTech Agent")
+    else:
+        st.title("TalTech Agent")
     st.caption(f"Backend: {BACKEND_LABEL}")
+    st.caption(f"Signed in as **{_user_email}**")
+    if _auth_enabled():
+        if st.button("Sign out", key="logout_btn"):
+            st.logout()
     st.divider()
 
-    mode = st.radio("Mode", MODES, index=MODES.index(st.session_state.mode))
-    st.session_state.mode = mode
+    render_history_sidebar(_user_email)
 
     st.divider()
-    st.subheader("Actions")
+    st.subheader("Export")
     col1, col2 = st.columns(2)
 
-    if col1.button("📥 Export"):
+    if col1.button("📥 Chat"):
         chat_md = _build_chat_export()
         st.download_button(
-            "Download chat",
+            "Download",
             data=chat_md,
             file_name=f"taltech_chat_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
             mime="text/markdown",
@@ -142,75 +241,162 @@ with st.sidebar:
         else:
             st.info("No citations collected yet.")
 
-    if st.button("🗑️ Clear chat", use_container_width=True):
-        st.session_state.messages = []
-        st.session_state.bibtex_store = []
-        st.rerun()
-
-    st.divider()
-    with st.expander("ℹ️ How to use"):
-        st.markdown("""
-**Research Assistant** — Ask anything:
-- *Find papers on SLAM in robotics*
-- *Leia andmestikud vibratsioonanalüüsi jaoks*
-- *What simulation tools does TalTech have?*
-
-**Find Research Gaps** — Discover under-researched topics:
-- *What robotics topics haven't been studied at TalTech?*
-
-**Similar Thesis Finder** — Paste your abstract:
-- The agent finds related TalTech theses and papers
-
-**Cite a Source** — Generate BibTeX / IEEE / APA:
-- *Generate BibTeX for the first result*
-""")
-
 # ── Main area ─────────────────────────────────────────────────────────────────
-st.title("🎓 TalTech Research Assistant")
+if BOT_AVATAR is not None:
+    head_col1, head_col2 = st.columns([1, 12])
+    with head_col1:
+        st.image(BOT_AVATAR, width=56)
+    with head_col2:
+        st.title("TalTech Research Assistant")
+else:
+    st.title("TalTech Research Assistant")
 st.caption(
-    "Bilingual (ET/EN) · Thesis · Papers · Datasets · Simulation Tools · GitHub"
+    "Bilingual (ET/EN) · Thesis · Papers · Datasets · Simulation Tools · GitHub · Plots"
 )
 
-MODE_PROMPTS = {
-    "Research Assistant": "Ask your research question here…",
-    "Find Research Gaps": "Describe a topic and I'll check how well it's covered at TalTech…",
-    "Similar Thesis Finder": "Paste your thesis abstract and I'll find similar work…",
-    "Cite a Source": "Tell me what to cite (paste the title or URL)…",
-}
+chat_col, artifact_col = st.columns([2, 1], gap="medium")
 
-# Render chat history
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+with artifact_col:
+    render_artifact_panel(st.session_state.artifacts)
 
-# Chat input — disabled while a response is streaming to avoid races.
-placeholder = MODE_PROMPTS.get(mode, "Ask your research question here…")
-chat_disabled = st.session_state.is_generating
-prompt = st.chat_input(placeholder, disabled=chat_disabled)
-if prompt:
-    augmented = _augment_prompt(prompt, mode)
+with chat_col:
+    # Render chat history
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"], avatar=_avatar_for(msg["role"])):
+            _render_attachments(msg.get("attachments") or [])
+            st.markdown(msg["content"])
 
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    st.session_state.is_generating = True
-    try:
-        with st.chat_message("assistant"):
-            thinking_slot = st.empty()
-            thinking_slot.markdown(
-                rotating_logo_html("Searching TalTech resources…"),
-                unsafe_allow_html=True,
+    # `+` popover for uploads and citations, plus chat input.
+    plus_col, input_col = st.columns([1, 20], gap="small")
+    with plus_col:
+        with st.popover("➕", use_container_width=True):
+            uploaded = st.file_uploader(
+                "Upload PDF or image",
+                type=["pdf", "png", "jpg", "jpeg"],
+                accept_multiple_files=True,
+                key="plus_uploader",
             )
-            try:
-                history = _build_history()
-                response = agent_run(augmented, history=history)
-            finally:
-                thinking_slot.empty()
+            if uploaded:
+                for f in uploaded:
+                    _queue_attachment(f)
 
-            st.markdown(response)
-            _extract_and_store_bibtex(response)
+            st.divider()
+            with st.form("cite_form", clear_on_submit=True):
+                cite_query = st.text_input(
+                    "Cite a source (title, URL, or DOI)",
+                    key="cite_query_field",
+                )
+                cite_submit = st.form_submit_button("Generate citation")
+                if cite_submit and cite_query.strip():
+                    st.session_state.queued_prompt = (
+                        f"Generate BibTeX, IEEE, and APA citations for: "
+                        f"{cite_query.strip()}"
+                    )
 
-        st.session_state.messages.append({"role": "assistant", "content": response})
-    finally:
-        st.session_state.is_generating = False
+    # Render pending-attachment chips so the user can remove before sending.
+    if st.session_state.pending_attachments:
+        with input_col:
+            st.caption("Attached:")
+            cols = st.columns(min(4, len(st.session_state.pending_attachments)))
+            for idx, entry in enumerate(st.session_state.pending_attachments):
+                target = cols[idx % len(cols)]
+                with target:
+                    if st.button(
+                        f"✕ {entry['name'][:18]}",
+                        key=f"rm_{entry['digest']}",
+                        help="Remove attachment",
+                    ):
+                        _remove_pending(entry["digest"])
+                        st.rerun()
+
+    chat_disabled = st.session_state.is_generating
+    with input_col:
+        typed = st.chat_input(
+            "Ask a research question, paste an abstract, or request a plot…",
+            disabled=chat_disabled,
+        )
+
+    # Prefer queued prompt (from citation form) over chat_input when both fire.
+    prompt_text = (typed or "").strip()
+    if not prompt_text and st.session_state.queued_prompt:
+        prompt_text = st.session_state.queued_prompt
+        st.session_state.queued_prompt = None
+
+    pending_files = _drain_pending_attachments() if prompt_text else []
+
+    if prompt_text or pending_files:
+        attachments = classify_attachments(pending_files) if pending_files else []
+        for att in attachments:
+            if att.get("kind") == "skipped":
+                st.warning(att.get("skipped_reason", "File skipped."))
+
+        display_text = prompt_text or "(attachments only)"
+        agent_prompt = prompt_text or (
+            "The user uploaded attachments without a text prompt. Analyse them and "
+            "search for related TalTech and public resources."
+        )
+
+        # Persist chat row (create on first turn).
+        if st.session_state.current_chat_id is None:
+            st.session_state.current_chat_id = chat_store.new_chat(
+                _user_email, display_text
+            )
+
+        user_msg = {"role": "user", "content": display_text, "attachments": attachments}
+        st.session_state.messages.append(user_msg)
+        chat_store.save_message(
+            st.session_state.current_chat_id,
+            _user_email,
+            "user",
+            display_text,
+            attachments=attachments,
+        )
+
+        with st.chat_message("user", avatar=USER_AVATAR):
+            _render_attachments(attachments)
+            st.markdown(display_text)
+
+        st.session_state.is_generating = True
+        try:
+            with st.chat_message("assistant", avatar=BOT_AVATAR):
+                thinking_slot = st.empty()
+                thinking_slot.markdown(
+                    rotating_logo_html("Searching TalTech resources…"),
+                    unsafe_allow_html=True,
+                )
+                try:
+                    history = _build_history()
+                    result = agent_run(
+                        agent_prompt,
+                        history=history,
+                        attachments=attachments,
+                    )
+                finally:
+                    thinking_slot.empty()
+
+                response = result.get("content", "") if isinstance(result, dict) else str(result)
+                new_artifacts = (
+                    result.get("artifacts", []) if isinstance(result, dict) else []
+                )
+                st.markdown(response)
+                _extract_and_store_bibtex(response)
+
+            if new_artifacts:
+                st.session_state.artifacts.extend(new_artifacts)
+
+            assistant_msg = {
+                "role": "assistant",
+                "content": response,
+                "artifacts": new_artifacts,
+            }
+            st.session_state.messages.append(assistant_msg)
+            chat_store.save_message(
+                st.session_state.current_chat_id,
+                _user_email,
+                "assistant",
+                response,
+                artifacts=new_artifacts,
+            )
+        finally:
+            st.session_state.is_generating = False
+        st.rerun()

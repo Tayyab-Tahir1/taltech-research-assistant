@@ -106,6 +106,7 @@ def _extract_item(item) -> dict[str, Any] | None:
         "degree": degree,
         "url": href,
         "snippet": "",
+        "source": "taltech_digikogu",
     }
 
 
@@ -130,6 +131,7 @@ def _fallback_extract(soup: BeautifulSoup, top_k: int) -> list[dict[str, Any]]:
                 "degree": "",
                 "url": href,
                 "snippet": "",
+                "source": "taltech_digikogu",
             }
         )
         if len(results) >= top_k:

@@ -1,7 +1,7 @@
 """
 Academic paper search via Semantic Scholar Graph API.
 
-Free tier: ~100 requests/5 min. No API key needed for basic use.
+Free tier: ~100 requests/5 min. With SEMANTIC_SCHOLAR_API_KEY: 100 RPS.
 Returns papers with title, authors, abstract, year, and open-access PDF link.
 """
 from __future__ import annotations
@@ -12,13 +12,45 @@ from typing import Any
 
 import requests
 
-from app.config import SEMANTIC_SCHOLAR_URL, SEMANTIC_SCHOLAR_FIELDS
-from app.tools._http import HTTP_TIMEOUT, get_session
+from app.config import (
+    SEMANTIC_SCHOLAR_API_KEY,
+    SEMANTIC_SCHOLAR_FIELDS,
+    SEMANTIC_SCHOLAR_URL,
+)
+from app.tools._http import (
+    HTTP_TIMEOUT,
+    RateLimitError,
+    SourceUnavailableError,
+    get_session,
+)
 
 logger = logging.getLogger(__name__)
 
 _LAST_CALL: float = 0.0
-_MIN_INTERVAL = 1.1  # respect ~1 RPS rate limit
+_MIN_INTERVAL = 1.1  # respect ~1 RPS rate limit on the free tier
+
+_HEADERS: dict[str, str] = {}
+if SEMANTIC_SCHOLAR_API_KEY:
+    _HEADERS["x-api-key"] = SEMANTIC_SCHOLAR_API_KEY
+
+
+def _check_rate_limit(resp: requests.Response) -> None:
+    """Raise RateLimitError on rate-limit responses."""
+    if resp.status_code == 429:
+        raise RateLimitError(
+            "SemanticScholar",
+            "Semantic Scholar returned 429 Too Many Requests — "
+            "set SEMANTIC_SCHOLAR_API_KEY to raise the limit.",
+        )
+    if resp.status_code == 403:
+        body = (resp.text or "").lower()
+        if "rate" in body or "limit" in body or "quota" in body:
+            raise RateLimitError(
+                "SemanticScholar",
+                "Semantic Scholar rate-limited this IP "
+                "(shared cloud IP likely throttled). "
+                "Set SEMANTIC_SCHOLAR_API_KEY or try again in a minute.",
+            )
 
 
 def search_papers(
@@ -34,7 +66,11 @@ def search_papers(
         year_filter: Optional year range like "2020-2024" or "2022-".
 
     Returns:
-        List of dicts: title, authors, abstract, year, pdf_url, url.
+        List of dicts with source stamp "semantic_scholar".
+
+    Raises:
+        RateLimitError: When Semantic Scholar throttles this request.
+        SourceUnavailableError: When the API is unreachable or returns unexpected data.
     """
     _rate_limit()
     params: dict[str, Any] = {
@@ -47,20 +83,37 @@ def search_papers(
 
     session = get_session()
     try:
-        resp = session.get(SEMANTIC_SCHOLAR_URL, params=params, timeout=HTTP_TIMEOUT)
+        resp = session.get(
+            SEMANTIC_SCHOLAR_URL,
+            params=params,
+            headers=_HEADERS or None,
+            timeout=HTTP_TIMEOUT,
+        )
+        _check_rate_limit(resp)
         resp.raise_for_status()
         data = resp.json()
+    except RateLimitError:
+        raise
     except requests.RequestException as exc:
         logger.warning("Semantic Scholar request failed: %s", exc)
-        return []
-    except ValueError:
-        logger.warning("Semantic Scholar returned invalid JSON")
-        return []
+        raise SourceUnavailableError(
+            "SemanticScholar",
+            f"Semantic Scholar unreachable: {exc}",
+        ) from exc
+    except ValueError as exc:
+        logger.warning("Semantic Scholar returned invalid JSON: %s", exc)
+        raise SourceUnavailableError(
+            "SemanticScholar",
+            "Semantic Scholar returned an unexpected response (invalid JSON).",
+        ) from exc
 
-    papers = []
-    for item in data.get("data", []):
-        papers.append(_format_paper(item))
-    return papers
+    if not isinstance(data, dict) or "data" not in data:
+        raise SourceUnavailableError(
+            "SemanticScholar",
+            "Semantic Scholar returned an unexpected response schema.",
+        )
+
+    return [_format_paper(item) for item in data.get("data", [])]
 
 
 def _format_paper(item: dict) -> dict[str, Any]:
@@ -87,6 +140,7 @@ def _format_paper(item: dict) -> dict[str, Any]:
         "year": item.get("year"),
         "pdf_url": pdf_url,
         "url": url,
+        "source": "semantic_scholar",
     }
 
 

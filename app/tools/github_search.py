@@ -117,6 +117,7 @@ def _repo_search(params: dict, top_k: int) -> list[dict[str, Any]]:
                 "language": item.get("language", ""),
                 "topics": item.get("topics", []),
                 "updated_at": (item.get("updated_at") or "")[:10],
+                "source": "github",
             }
         )
     return results

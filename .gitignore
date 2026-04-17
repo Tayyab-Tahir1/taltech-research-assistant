@@ -39,3 +39,7 @@ Dataset/
 
 # Streamlit local cache
 .streamlit/cache/
+
+# SQLite chat history (per-user; not for commit)
+data/
+data/chats.db

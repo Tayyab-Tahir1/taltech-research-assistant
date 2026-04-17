@@ -17,6 +17,7 @@ _IMAGES_DIR = _ROOT / "images"
 
 LOGO_PATH = _IMAGES_DIR / "logo-taltech-1.png"
 BG_PATH = _IMAGES_DIR / "taltech bg1.png"
+PROFILE_PATH = _IMAGES_DIR / "profile.png"
 
 
 @st.cache_resource(show_spinner=False)
@@ -35,6 +36,30 @@ def logo_b64() -> str:
 def bg_b64() -> str:
     """Return the TalTech sidebar background as a base64-encoded PNG string."""
     return _b64(str(BG_PATH))
+
+
+@st.cache_resource(show_spinner=False)
+def _pil_image(path_str: str):
+    """Return a PIL Image for the given asset path, or None if unavailable."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    path = Path(path_str)
+    if not path.exists():
+        return None
+    with path.open("rb") as fh:
+        return Image.open(BytesIO(fh.read())).copy()
+
+
+def logo_image():
+    """Return the TalTech logo as a PIL Image (or None)."""
+    return _pil_image(str(LOGO_PATH))
+
+
+def profile_image():
+    """Return the user profile image as a PIL Image (or None)."""
+    return _pil_image(str(PROFILE_PATH))
 
 
 @st.cache_resource(show_spinner=False)

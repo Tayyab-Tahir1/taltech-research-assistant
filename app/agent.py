@@ -1,8 +1,9 @@
 """
-GPT-4o tool-use agent loop.
+Function-calling agent loop.
 
-Registers 7 tools as OpenAI function calls, runs the agent loop until the
-model stops calling tools, and returns the final text response.
+Backend-agnostic: talks to Gemini 2.5, GPT-4o, or a local vLLM through
+:mod:`app.llm`. Registers ~10 research tools, dispatches calls, and returns
+the model's final text response to the Streamlit UI.
 """
 from __future__ import annotations
 
@@ -10,10 +11,11 @@ import json
 import logging
 from typing import Any
 
-from app.config import client, MODEL
-from app.tools._http import RateLimitError, ScraperStaleError
+from app import llm
+from app.tools._http import RateLimitError, ScraperStaleError, SourceUnavailableError
 from app.tools.taltech_search import search_taltech_theses
 from app.tools.papers import search_papers
+from app.tools.arxiv_search import search_arxiv
 from app.tools.datasets import search_datasets
 from app.tools.sim_tools import get_simulation_tools
 from app.tools.github_search import (
@@ -21,6 +23,7 @@ from app.tools.github_search import (
     search_taltech_github,
     get_github_readme,
 )
+from app.tools.analysis import generate_plot, run_analysis
 from app.features.gap_finder import find_research_gaps
 from app.features.similar_thesis import find_similar_theses
 
@@ -28,13 +31,14 @@ logger = logging.getLogger(__name__)
 
 MAX_MESSAGE_LEN = 2000
 
-# ── System prompt ──────────────────────────────────────────────────────────────
+# ── System prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are TalTech Research Assistant, an AI agent helping engineering
 students at Tallinn University of Technology (TalTech) find resources for their research.
 
 You have access to the following tools:
 - search_taltech_theses: Search TalTech's thesis repository (Bachelor's, Master's, PhD)
 - search_papers: Search 200M+ academic papers via Semantic Scholar
+- search_arxiv: Search arXiv.org preprints (free public fallback, no rate limit)
 - search_datasets: Find research datasets on Kaggle and Zenodo
 - get_simulation_tools: List simulation software available at TalTech
 - search_github_repos: Find open-source code on GitHub
@@ -42,6 +46,19 @@ You have access to the following tools:
 - get_github_readme: Fetch a GitHub repo's README for details
 - find_research_gaps: Check how well a topic is covered in TalTech theses
 - find_similar_theses: Find theses and papers similar to a given abstract
+- generate_plot: Build a Plotly chart (bar/line/scatter/hist/pie) from data you already have
+- run_analysis: Run a short Python snippet for analysis; returns plots, tables, and code as artifacts
+
+HOW TO INTERPRET INTENT (infer from the prompt — there are no explicit modes):
+  • If the user pastes a long block resembling a thesis abstract (≥ ~400 chars
+    describing their own research), call ``find_similar_theses`` on it.
+  • If the user asks about coverage, under-researched areas, research gaps,
+    or "what hasn't been studied" at TalTech, call ``find_research_gaps``.
+  • If the user explicitly says "cite", "citation", "BibTeX", "IEEE", or "APA"
+    for a specific source, search for the source first (if needed) and then
+    produce BibTeX + IEEE + APA blocks side by side.
+  • Otherwise, run the general research flow: TalTech theses first, then
+    Semantic Scholar, then arXiv.
 
 Guidelines:
 1. ALWAYS use your search tools BEFORE answering — never fabricate paper titles,
@@ -57,10 +74,30 @@ Guidelines:
    temporarily unavailable and relay the message — NEVER invent results to fill
    the gap. Prefer results from other working tools and be explicit about what
    failed.
+10. CITE THE SOURCE OF EVERY RESULT. Group results under explicit section headings
+    that name the origin, e.g. "**From TalTech digikogu:**", "**From Semantic
+    Scholar (public):**", "**From arXiv (public):**", "**From GitHub (public):**".
+    Never merge sources into an unlabelled list — the student must always be able
+    to see whether a result came from TalTech's own catalogue or a public source.
+12. When the user asks for analysis, trends, comparison, counts by year, or a
+    visualisation, call ``generate_plot`` (preferred for simple charts from data
+    you already have) or ``run_analysis`` (for deeper computations). Describe
+    each artifact briefly in text — the UI will render the actual chart/table
+    on the right; do NOT paste the raw data back in chat.
+11. FALLBACK CHAIN for paper/literature queries: ALWAYS try tools in this order,
+    and include results from every tool that returns data — don't stop at the
+    first one:
+       a. search_taltech_theses (TalTech first)
+       b. search_papers (Semantic Scholar)
+       c. search_arxiv (public fallback)
+    If TalTech returns nothing, explicitly say "No TalTech theses matched — here
+    are public results:" and then show Semantic Scholar + arXiv findings. If
+    Semantic Scholar returns an error sentinel (rate-limited), acknowledge it
+    and still show arXiv results so the student is never left empty-handed.
 
 Never invent: paper titles, author names, dataset URLs, GitHub stars, or tool availability."""
 
-# ── Tool schemas (OpenAI function-call format) ────────────────────────────────
+# ── Tool schemas (OpenAI function-call format; the adapter translates for Gemini) ──
 TOOLS: list[dict] = [
     {
         "type": "function",
@@ -78,7 +115,6 @@ TOOLS: list[dict] = [
                     "top_k": {
                         "type": "integer",
                         "description": "Number of results to return (default 5)",
-                        "default": 5,
                     },
                 },
                 "required": ["query"],
@@ -100,12 +136,32 @@ TOOLS: list[dict] = [
                     "max_results": {
                         "type": "integer",
                         "description": "Max papers to return (default 5)",
-                        "default": 5,
                     },
                     "year_filter": {
                         "type": "string",
                         "description": "Optional year range, e.g. '2020-2024'",
-                        "default": "",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_arxiv",
+            "description": (
+                "Search arXiv.org preprints (free, public, no rate limit). "
+                "Use as a fallback when Semantic Scholar is unavailable, or alongside "
+                "it for broader coverage. Returns title, authors, abstract, year, and PDF link."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of results to return (default 5, max 25)",
                     },
                 },
                 "required": ["query"],
@@ -132,7 +188,6 @@ TOOLS: list[dict] = [
                     "max_results": {
                         "type": "integer",
                         "description": "Results per source (default 5)",
-                        "default": 5,
                     },
                 },
                 "required": ["query"],
@@ -182,7 +237,6 @@ TOOLS: list[dict] = [
                     "top_k": {
                         "type": "integer",
                         "description": "Number of results (default 5)",
-                        "default": 5,
                     },
                 },
                 "required": ["query"],
@@ -205,7 +259,6 @@ TOOLS: list[dict] = [
                     "top_k": {
                         "type": "integer",
                         "description": "Number of results (default 5)",
-                        "default": 5,
                     },
                 },
                 "required": ["query"],
@@ -262,6 +315,65 @@ TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "generate_plot",
+            "description": (
+                "Create a Plotly chart as an artifact for the right-hand panel. "
+                "Use for simple visualisations built from data you already have: "
+                "year histograms, per-topic bar charts, comparison scatter plots."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["bar", "line", "scatter", "hist", "pie"],
+                        "description": "Plot type.",
+                    },
+                    "data": {
+                        "type": "object",
+                        "description": (
+                            "Plot data. Either a single series with x/y (or values/labels) "
+                            "or {series: [{name, x, y}, ...]} for multi-series charts."
+                        ),
+                    },
+                    "options": {
+                        "type": "object",
+                        "description": "Optional title, x_label, y_label, color.",
+                    },
+                },
+                "required": ["kind", "data"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_analysis",
+            "description": (
+                "Run a short Python snippet in a restricted subprocess (timeout 15s). "
+                "Helpers `emit_table(df)` and `emit_figure(fig)` are pre-injected so "
+                "the snippet can return DataFrames and Plotly figures as artifacts. "
+                "`data` (if provided) is exposed to the snippet as a module-level dict."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "Python code to execute.",
+                    },
+                    "data": {
+                        "type": "object",
+                        "description": "Optional JSON-serialisable dict available to the snippet as `data`.",
+                    },
+                },
+                "required": ["code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "find_similar_theses",
             "description": (
                 "Given a thesis abstract or description, find similar TalTech theses "
@@ -283,7 +395,6 @@ TOOLS: list[dict] = [
                     "top_k": {
                         "type": "integer",
                         "description": "Results per source (default 5)",
-                        "default": 5,
                     },
                 },
                 "required": ["abstract"],
@@ -296,6 +407,7 @@ TOOLS: list[dict] = [
 _TOOL_MAP: dict[str, Any] = {
     "search_taltech_theses": search_taltech_theses,
     "search_papers": search_papers,
+    "search_arxiv": search_arxiv,
     "search_datasets": search_datasets,
     "get_simulation_tools": get_simulation_tools,
     "search_github_repos": search_github_repos,
@@ -303,61 +415,95 @@ _TOOL_MAP: dict[str, Any] = {
     "get_github_readme": get_github_readme,
     "find_research_gaps": find_research_gaps,
     "find_similar_theses": find_similar_theses,
+    "generate_plot": generate_plot,
+    "run_analysis": run_analysis,
 }
+
+# Tools that emit artifact descriptors consumable by the right-hand UI panel.
+_ARTIFACT_TOOLS = {"generate_plot", "run_analysis"}
+
+# Tools that warrant the deep-reasoning model tier (Gemini 2.5 Pro with thinking).
+_DEEP_TOOLS = {"find_research_gaps", "find_similar_theses"}
 
 
 def run(
     user_message: str,
     history: list[dict] | None = None,
+    attachments: list[dict] | None = None,
     max_iterations: int = 6,
-) -> str:
-    """Run the agent loop and return the final assistant message.
+) -> dict[str, Any]:
+    """Run the agent loop.
 
-    Args:
-        user_message: The latest user message.
-        history: Prior conversation messages (list of {role, content} dicts).
-        max_iterations: Safety cap on tool-call rounds.
-
-    Returns:
-        Final assistant response as a string.
+    Returns a dict ``{"content": str, "artifacts": list[dict]}`` so the UI can
+    render chat text and the artifact panel from the same call.
     """
     cleaned = _validate_message(user_message)
+    if cleaned is None and not attachments:
+        return {"content": "Please type a question (1–2000 characters).", "artifacts": []}
     if cleaned is None:
-        return "Please type a question (1–2000 characters)."
+        cleaned = "(attachments only)"
 
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
     if history:
         messages.extend(history)
-    messages.append({"role": "user", "content": cleaned})
+    messages.append(_build_user_message(cleaned, attachments))
 
+    collected_artifacts: list[dict] = []
+    use_deep = False
     for _ in range(max_iterations):
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            tools=TOOLS,
-            tool_choice="auto",
-        )
+        response = llm.chat(messages, tools=TOOLS, deep=use_deep)
+        messages.append(response.raw_message)
 
-        msg = response.choices[0].message
-        messages.append(msg.model_dump(exclude_none=True))
+        if not response.tool_calls:
+            return {
+                "content": response.content or "",
+                "artifacts": collected_artifacts,
+            }
 
-        # No tool calls — we have the final answer
-        if not msg.tool_calls:
-            return msg.content or ""
-
-        # Execute all requested tool calls
-        for tc in msg.tool_calls:
-            result = _call_tool(tc.function.name, tc.function.arguments)
+        for tc in response.tool_calls:
+            if tc.name in _DEEP_TOOLS:
+                use_deep = True
+            result = _call_tool(tc.name, tc.arguments)
+            if tc.name in _ARTIFACT_TOOLS and isinstance(result, dict):
+                for art in result.get("artifacts") or []:
+                    if isinstance(art, dict):
+                        collected_artifacts.append(art)
             messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": tc.id,
+                    "name": tc.name,  # required by the Gemini adapter
                     "content": json.dumps(result, ensure_ascii=False, default=str),
                 }
             )
 
     logger.warning("Agent reached max_iterations without a final answer")
-    return "I ran into a processing limit. Please try rephrasing your question."
+    return {
+        "content": "I ran into a processing limit. Please try rephrasing your question.",
+        "artifacts": collected_artifacts,
+    }
+
+
+def _build_user_message(text: str, attachments: list[dict] | None) -> dict:
+    """Build the user message, inlining PDF text and attaching images as vision parts."""
+    usable = [a for a in (attachments or []) if a.get("kind") in {"pdf", "image"}]
+    if not usable:
+        return {"role": "user", "content": text}
+
+    pdf_blocks: list[str] = []
+    for att in usable:
+        if att.get("kind") == "pdf" and att.get("text"):
+            pdf_blocks.append(
+                f"\n\n--- Attached PDF: {att.get('name', 'document.pdf')} ---\n"
+                f"{att['text']}\n--- end PDF ---"
+            )
+
+    combined_text = text + ("".join(pdf_blocks) if pdf_blocks else "")
+    content: list[dict] = [{"type": "text", "text": combined_text}]
+    for att in usable:
+        if att.get("kind") == "image" and att.get("data_url"):
+            content.append({"type": "image_url", "image_url": {"url": att["data_url"]}})
+    return {"role": "user", "content": content}
 
 
 def _validate_message(text: str) -> str | None:
@@ -398,6 +544,13 @@ def _call_tool(name: str, arguments_json: str) -> Any:
             name,
             f"{exc.service} rate limit reached.",
             hint="Set GITHUB_TOKEN in your environment to raise the limit from 60 to 5000 req/hr.",
+        )
+    except SourceUnavailableError as exc:
+        logger.warning("Tool %s source unavailable: %s", name, exc)
+        return _error_sentinel(
+            name,
+            f"{exc.service} is temporarily unavailable: {exc}",
+            hint="Try again in a minute, or set SEMANTIC_SCHOLAR_API_KEY for higher limits.",
         )
     except ScraperStaleError as exc:
         logger.warning("Tool %s scraper stale: %s", name, exc)
