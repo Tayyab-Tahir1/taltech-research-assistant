@@ -1,0 +1,154 @@
+tools:
+  - name: MATLAB / Simulink
+    domain: [mechanical, electrical, control, signal, general]
+    description: >
+      Industry-standard numerical computing environment with Simulink for dynamic
+      system simulation. Used across all engineering disciplines at TalTech.
+    license: commercial — TalTech site license
+    access: Apply via IT department; eligible students and staff can request a license at student.taltech.ee
+    url: https://taltech.ee/en/it-services
+    docs_url: https://mathworks.com/help/matlab/
+
+  - name: COMSOL Multiphysics
+    domain: [mechanical, thermal, electromagnetic, chemical, fluid]
+    description: >
+      FEM-based multiphysics simulation platform covering structural mechanics,
+      heat transfer, electromagnetics, and fluid dynamics. TalTech holds a
+      campus license.
+    license: commercial — TalTech site license
+    access: Contact the IT helpdesk or your department's lab coordinator
+    url: https://www.comsol.com
+    docs_url: https://www.comsol.com/documentation
+
+  - name: Ansys Student
+    domain: [structural, FEA, CFD, electromagnetics, thermal]
+    description: >
+      Full Ansys simulation suite (Mechanical, Fluent, Maxwell, etc.) with a
+      free student version that covers most coursework needs.
+    license: free student license
+    access: Download directly from ansys.com/academic/students
+    url: https://www.ansys.com/academic/students
+    docs_url: https://ansys.com/resource-center/online-learning
+
+  - name: OpenFOAM
+    domain: [fluid dynamics, CFD, thermal, combustion]
+    description: >
+      Open-source C++ CFD toolbox widely used in academia for incompressible
+      and compressible flows, heat transfer, and multiphase problems.
+    license: free / open-source (GPL)
+    access: Download directly from openfoam.org
+    url: https://openfoam.org
+    docs_url: https://www.openfoam.com/documentation/user-guide
+
+  - name: FEniCSx
+    domain: [structural, thermal, fluid, electromagnetics, mathematics]
+    description: >
+      Open-source Python/C++ FEM framework for solving PDEs. Ideal for custom
+      physics and research-level simulations. GPU-accelerated via PETSc.
+    license: free / open-source (LGPL)
+    access: pip install fenics-dolfinx or via Docker
+    url: https://fenicsproject.org
+    docs_url: https://docs.fenicsproject.org
+
+  - name: LTspice
+    domain: [electronics, circuits, power electronics, analog]
+    description: >
+      Free high-performance SPICE simulator from Analog Devices. Industry
+      standard for analog and mixed-signal circuit design and verification.
+    license: free (proprietary)
+    access: Download from Analog Devices website
+    url: https://www.analog.com/en/design-center/design-tools-and-calculators/ltspice-simulator.html
+    docs_url: https://www.analog.com/en/design-center/design-tools-and-calculators/ltspice-simulator.html
+
+  - name: KiCad
+    domain: [electronics, PCB design, circuits]
+    description: >
+      Open-source EDA tool for schematic capture and PCB layout. Excellent for
+      student projects requiring custom hardware design.
+    license: free / open-source (GPL)
+    access: Download from kicad.org
+    url: https://www.kicad.org
+    docs_url: https://docs.kicad.org
+
+  - name: Gazebo / ROS 2
+    domain: [robotics, control, simulation, autonomous systems]
+    description: >
+      Open-source 3D robotics simulator tightly integrated with ROS 2.
+      Supports physics simulation, sensor modeling, and multi-robot scenarios.
+    license: free / open-source (Apache 2.0)
+    access: Install via apt or Docker; ROS 2 Humble/Iron are LTS releases
+    url: https://gazebosim.org
+    docs_url: https://gazebosim.org/docs
+
+  - name: Webots
+    domain: [robotics, control, simulation, autonomous systems]
+    description: >
+      Free open-source robot simulator by Cyberbotics. Simpler to set up than
+      Gazebo; good for educational and rapid-prototyping scenarios.
+    license: free / open-source (Apache 2.0)
+    access: Download from cyberbotics.com
+    url: https://cyberbotics.com
+    docs_url: https://cyberbotics.com/doc/guide/index
+
+  - name: Simulink (standalone)
+    domain: [control, signal, embedded, electrical]
+    description: >
+      Part of MATLAB — block-diagram environment for modeling and simulating
+      dynamic systems. Heavily used in control systems and signal processing
+      courses at TalTech.
+    license: commercial — TalTech site license (included with MATLAB)
+    access: Same as MATLAB license
+    url: https://mathworks.com/products/simulink.html
+    docs_url: https://mathworks.com/help/simulink/
+
+  - name: PLECS
+    domain: [power electronics, electrical, control]
+    description: >
+      Simulation tool for power electronic systems. Available as a standalone
+      desktop app or as a Simulink blockset.
+    license: commercial (free student trial available)
+    access: plexim.com/products/plecs — request student license
+    url: https://www.plexim.com/products/plecs
+    docs_url: https://www.plexim.com/support/documentation
+
+  - name: AutoCAD / Inventor
+    domain: [mechanical, civil, design, CAD]
+    description: >
+      Autodesk CAD and 3D modeling tools. TalTech students have access through
+      the Autodesk Education Community.
+    license: free for students via Autodesk Education
+    access: autodesk.com/education/edu-software/overview
+    url: https://www.autodesk.com/education/edu-software/overview
+    docs_url: https://knowledge.autodesk.com
+
+  - name: SolidWorks
+    domain: [mechanical, design, CAD, FEA]
+    description: >
+      Parametric 3D CAD system with integrated FEA (Simulation) and flow
+      simulation. Widely used in mechanical engineering curricula.
+    license: commercial — check with department for TalTech availability
+    access: Contact department lab or IT helpdesk
+    url: https://www.solidworks.com
+    docs_url: https://help.solidworks.com
+
+  - name: Python (SciPy / NumPy / scikit-learn)
+    domain: [general, data analysis, signal, machine learning, mathematics]
+    description: >
+      Open-source scientific Python stack. NumPy for arrays, SciPy for
+      numerical methods, scikit-learn for ML. Essential for data-driven
+      engineering research.
+    license: free / open-source
+    access: pip install scipy numpy scikit-learn
+    url: https://scipy.org
+    docs_url: https://docs.scipy.org/doc/scipy/
+
+  - name: Julia
+    domain: [general, numerical computing, optimization, simulation]
+    description: >
+      High-performance language for numerical computing. Combines MATLAB-like
+      syntax with Python-level flexibility and near-C speed. Good for
+      large-scale simulations.
+    license: free / open-source (MIT)
+    access: julialang.org
+    url: https://julialang.org
+    docs_url: https://docs.julialang.org

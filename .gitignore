@@ -1,0 +1,41 @@
+# Secrets & environment
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build / dist
+build/
+dist/
+
+# SLURM logs
+slurm-*.out
+*.log
+
+# Local thesis dataset (14 GB — do NOT commit; scraped/downloaded data)
+Dataset/
+
+# Streamlit local cache
+.streamlit/cache/
