@@ -108,17 +108,39 @@ def _current_user_provider() -> str | None:
             return "Microsoft"
         if "google" in iss or "accounts.google.com" in iss:
             return "Google"
+        # Flat [auth] layout doesn't always expose iss — default to Google.
+        if _auth_is_flat_google():
+            return "Google"
     except Exception:
         return None
     return None
 
 
 def _provider_configured(name: str) -> bool:
+    """True if [auth.<name>] sub-block exists in secrets (multi-provider mode)."""
     try:
         auth = st.secrets.get("auth")
         if not auth:
             return False
-        return bool(auth.get(name))
+        sub = auth.get(name)
+        if not sub:
+            return False
+        # Require at least client_id to consider it configured.
+        return bool(sub.get("client_id"))
+    except Exception:
+        return False
+
+
+def _auth_is_flat_google() -> bool:
+    """True if secrets use the legacy flat [auth] block (client_id at root).
+
+    In that layout, `st.login()` with no arguments is the correct call.
+    """
+    try:
+        auth = st.secrets.get("auth")
+        if not auth:
+            return False
+        return bool(auth.get("client_id")) and not auth.get("google") and not auth.get("microsoft")
     except Exception:
         return False
 
@@ -136,42 +158,26 @@ def _render_login_screen() -> None:
     )
     st.markdown("</div>", unsafe_allow_html=True)
 
+    flat_google = _auth_is_flat_google()
     has_google = _provider_configured("google")
-    has_microsoft = _provider_configured("microsoft")
 
-    if has_google and has_microsoft:
-        col_g, col_m = st.columns(2)
-        with col_g:
-            if st.button(
-                "Continue with Google",
-                type="primary",
-                use_container_width=True,
-                key="login_google",
-            ):
-                st.login("google")
-        with col_m:
-            if st.button(
-                "Continue with Microsoft",
-                use_container_width=True,
-                key="login_microsoft",
-            ):
-                st.login("microsoft")
-    elif has_microsoft:
-        if st.button(
-            "Continue with Microsoft",
-            type="primary",
-            use_container_width=True,
-            key="login_microsoft",
-        ):
-            st.login("microsoft")
-    else:
-        if st.button(
-            "Continue with Google",
-            type="primary",
-            use_container_width=True,
-            key="login_google",
-        ):
+    if st.button(
+        "Continue with Google",
+        type="primary",
+        use_container_width=True,
+        key="login_google",
+    ):
+        if has_google:
             st.login("google")
+        else:
+            # Legacy flat [auth] layout, or fallback attempt.
+            st.login()
+
+    if not (flat_google or has_google):
+        st.warning(
+            "Google OAuth is not configured. Add an `[auth]` block to "
+            "`.streamlit/secrets.toml` (see `.env.example`)."
+        )
 
     st.markdown(
         "<div class='landing-footer'>"
